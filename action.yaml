@@ -1,0 +1,59 @@
+name: "Customised Action - Deploy cfn after approval"
+author: Nat lu"
+permissions:
+  id-token: write
+  contents: read
+
+inputs:
+  stack-name:
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Extract Markdown Table
+      shell: bash
+      run: |
+
+        # Extract latest ChangeSetId which is the last element of the array
+        aws cloudformation list-change-sets --stack-name ${{ inputs.stack-name }} --query "Summaries[*].{ChangeSetId:ChangeSetId,Status:Status,StatusReason:StatusReason}" >> ChangesetIdStatusArray.json
+
+        cat ChangesetIdStatusArray.json
+
+        readarray -t my_array < <(jq -c '.[]' ChangesetIdStatusArray.json)
+        status=$(jq '.Status' <<< ${my_array[-1]} | tr -d '"')
+        status_reason=$(jq '.StatusReason' <<< ${my_array[-1]} | tr -d '"')
+
+        echo Status of current changeset $status as $status_reason
+
+        # If nothing changed in changeset, the Status will be FAILED
+        if [ $status == "FAILED" ]
+        then
+          echo $status_reason, Skip Deployment
+          exit 0
+        fi
+
+        changeset_id=$(jq '.ChangeSetId' <<< ${my_array[-1]} | tr -d '"')
+        echo This is the latest change set id $changeset_id
+
+        stack_status=`aws cloudformation describe-stacks --stack-name ${{ inputs.stack-name }} --query Stacks[0].StackStatus | tr -d '"'`
+
+        # Execute the changeset
+        aws cloudformation execute-change-set --change-set-name $changeset_id
+
+        stack_id=`aws cloudformation describe-stacks --stack-name ${{ inputs.stack-name }} --query Stacks[0].StackId | tr -d '"'`
+
+        echo Stack id is $stack_id
+
+        # If the stack is created for the first time, the stack_status will be "REVIEW_IN_PROGRESS" after create chenge set
+        # We will need to use "wait stack-create-complete" to wait it finish
+        # Otherwise we will need "wait stack-update-complete"
+        
+        echo Stack status is $stack_status
+
+        if [ $stack_status == "REVIEW_IN_PROGRESS" ]
+        then
+          aws cloudformation wait stack-create-complete --stack-name $stack_id
+        else
+          aws cloudformation wait stack-update-complete --stack-name $stack_id
+        fi
